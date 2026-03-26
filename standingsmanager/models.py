@@ -81,7 +81,7 @@ class StandingsEntry(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         related_name="standings_added",
-        help_text="User who added this standing",
+        help_text="User who requested this standing",
     )
     added_date = models.DateTimeField(
         auto_now_add=True,
@@ -240,7 +240,7 @@ class StandingRequest(models.Model):
                 eve_entity=self.eve_entity,
                 standing=standing,
                 entity_type=self.entity_type,
-                added_by=approver,
+                added_by=self.requested_by,
                 notes=notes,
             )
 
