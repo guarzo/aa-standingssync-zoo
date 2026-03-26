@@ -207,7 +207,7 @@ class StandingRequestTestCase(TestCase):
         self.assertIsNotNone(standing_entry)
         self.assertEqual(standing_entry.eve_entity, self.character_entity)
         self.assertEqual(standing_entry.standing, 7.0)
-        self.assertEqual(standing_entry.added_by, self.approver)
+        self.assertEqual(standing_entry.added_by, self.user)
 
         # Check audit log was created
         audit_logs = AuditLog.objects.filter(

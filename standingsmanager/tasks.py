@@ -2,6 +2,7 @@
 
 from celery import shared_task
 
+from django.db.models import Q
 from eveuniverse.core.esitools import is_esi_online
 from eveuniverse.tasks import update_unresolved_eve_entities
 
@@ -10,7 +11,7 @@ from app_utils.logging import LoggerAddTag
 
 from . import __title__
 from .app_settings import STANDINGS_AUTO_VALIDATE_INTERVAL, STANDINGS_SYNC_INTERVAL
-from .models import SyncedCharacter
+from .models import StandingRevocation, StandingsEntry, SyncedCharacter
 
 logger = LoggerAddTag(get_extension_logger(__name__), __title__)
 
@@ -155,6 +156,89 @@ def validate_synced_character(synced_char_pk: int):
     return is_valid
 
 
+@shared_task
+def validate_all_standings():
+    """Validate that all standings entries are still valid.
+
+    For character standings, checks that the added_by user (the original
+    requester) still has the required permission. When a user leaves the
+    alliance, their Auth state changes and they lose this permission —
+    their standings are automatically removed.
+
+    Standings without an added_by user are skipped.
+    """
+    from django.contrib.auth.models import Permission, User
+
+    character_standings = list(
+        StandingsEntry.objects.all_characters().select_related("eve_entity", "added_by")
+    )
+
+    if not character_standings:
+        logger.info("No character standings to validate.")
+        return
+
+    logger.info(
+        "Starting standings validation for %d character entries",
+        len(character_standings),
+    )
+
+    # Batch-load user IDs that have the required permission
+    perm = Permission.objects.get(
+        content_type__app_label="standingsmanager",
+        codename="add_syncedcharacter",
+    )
+    users_with_perm = set(
+        User.objects.filter(
+            Q(user_permissions=perm)
+            | Q(groups__permissions=perm)
+            | Q(is_superuser=True),
+            is_active=True,
+        ).values_list("id", flat=True)
+    )
+
+    # Batch-load entity IDs that already have pending revocations
+    entity_ids = [s.eve_entity_id for s in character_standings]
+    pending_revocation_entity_ids = set(
+        StandingRevocation.objects.pending()
+        .filter(eve_entity_id__in=entity_ids)
+        .values_list("eve_entity_id", flat=True)
+    )
+
+    to_delete = []
+    valid_count = 0
+    skipped_count = 0
+
+    for standing in character_standings:
+        if not standing.added_by_id:
+            valid_count += 1
+            continue
+
+        if standing.added_by_id in users_with_perm:
+            valid_count += 1
+            continue
+
+        if standing.eve_entity_id in pending_revocation_entity_ids:
+            skipped_count += 1
+            continue
+
+        logger.info(
+            "Auto-revoking standing for %s: user %s lost permission",
+            standing.eve_entity.name,
+            standing.added_by.username,
+        )
+        to_delete.append(standing.eve_entity_id)
+
+    if to_delete:
+        StandingsEntry.objects.filter(eve_entity_id__in=to_delete).delete()
+
+    logger.info(
+        "Standings validation complete: %d valid, %d revoked, %d skipped (pending revocation)",
+        valid_count,
+        len(to_delete),
+        skipped_count,
+    )
+
+
 # ============================================================================
 # Manual Trigger Tasks
 # ============================================================================
@@ -238,6 +322,8 @@ def run_regular_validation():
     )
 
     validate_all_synced_characters.apply_async(priority=DEFAULT_TASK_PRIORITY)
+
+    validate_all_standings.apply_async(priority=DEFAULT_TASK_PRIORITY)
 
 
 # ============================================================================
