@@ -164,8 +164,6 @@ def validate_all_standings():
     (via CharacterOwnership) still has the required permission. This
     catches users who leave the corporation/alliance and lose permission,
     including all their alt characters.
-
-    Also checks the added_by user as a secondary safety net.
     """
     from django.contrib.auth.models import Permission, User
 
@@ -224,7 +222,6 @@ def validate_all_standings():
     skipped_count = 0
     no_owner_count = 0
     owner_lost_perm_count = 0
-    added_by_lost_perm_count = 0
 
     for standing in character_standings:
         # Skip if already has a pending revocation
@@ -232,7 +229,6 @@ def validate_all_standings():
             skipped_count += 1
             continue
 
-        # Primary check: character owner must have permission
         owner_user_id = ownership_map.get(standing.eve_entity_id)
 
         if owner_user_id is None:
@@ -255,17 +251,6 @@ def validate_all_standings():
             owner_lost_perm_count += 1
             continue
 
-        # Secondary check: added_by user (if set) must also have permission
-        if standing.added_by_id and standing.added_by_id not in users_with_perm:
-            logger.info(
-                "Auto-revoking standing for %s: requester '%s' lost permission",
-                standing.eve_entity.name,
-                standing.added_by.username,
-            )
-            to_delete.append(standing.eve_entity_id)
-            added_by_lost_perm_count += 1
-            continue
-
         valid_count += 1
 
     if to_delete:
@@ -273,13 +258,11 @@ def validate_all_standings():
 
     logger.info(
         "Standings validation complete: %d valid, %d revoked "
-        "(no_owner=%d, owner_lost_perm=%d, requester_lost_perm=%d), "
-        "%d skipped (pending revocation)",
+        "(no_owner=%d, owner_lost_perm=%d), %d skipped (pending revocation)",
         valid_count,
         len(to_delete),
         no_owner_count,
         owner_lost_perm_count,
-        added_by_lost_perm_count,
         skipped_count,
     )
 
