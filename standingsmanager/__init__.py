@@ -3,5 +3,5 @@
 # pylint: disable = invalid-name
 default_app_config = "standingsmanager.apps.StandingsManagerConfig"
 
-__version__ = "0.0.17"
+__version__ = "0.0.18"
 __title__ = "Standings Manager"
