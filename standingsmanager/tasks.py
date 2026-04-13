@@ -160,14 +160,16 @@ def validate_synced_character(synced_char_pk: int):
 def validate_all_standings():
     """Validate that all standings entries are still valid.
 
-    For character standings, checks that the added_by user (the original
-    requester) still has the required permission. When a user leaves the
-    alliance, their Auth state changes and they lose this permission —
-    their standings are automatically removed.
+    For character standings, checks that the character's current owner
+    (via CharacterOwnership) still has the required permission. This
+    catches users who leave the corporation/alliance and lose permission,
+    including all their alt characters.
 
-    Standings without an added_by user are skipped.
+    Also checks the added_by user as a secondary safety net.
     """
     from django.contrib.auth.models import Permission, User
+
+    from allianceauth.authentication.models import CharacterOwnership
 
     character_standings = list(
         StandingsEntry.objects.all_characters().select_related("eve_entity", "added_by")
@@ -204,37 +206,80 @@ def validate_all_standings():
         .values_list("eve_entity_id", flat=True)
     )
 
+    # Batch-load character ownership: eve_character_id -> owner_user_id
+    ownership_map = dict(
+        CharacterOwnership.objects.filter(
+            character__character_id__in=entity_ids
+        ).values_list("character__character_id", "user_id")
+    )
+
+    # Also build a reverse map for logging: user_id -> username
+    owner_user_ids = set(ownership_map.values())
+    owner_usernames = dict(
+        User.objects.filter(id__in=owner_user_ids).values_list("id", "username")
+    )
+
     to_delete = []
     valid_count = 0
     skipped_count = 0
+    no_owner_count = 0
+    owner_lost_perm_count = 0
+    added_by_lost_perm_count = 0
 
     for standing in character_standings:
-        if not standing.added_by_id:
-            valid_count += 1
-            continue
-
-        if standing.added_by_id in users_with_perm:
-            valid_count += 1
-            continue
-
+        # Skip if already has a pending revocation
         if standing.eve_entity_id in pending_revocation_entity_ids:
             skipped_count += 1
             continue
 
-        logger.info(
-            "Auto-revoking standing for %s: user %s lost permission",
-            standing.eve_entity.name,
-            standing.added_by.username,
-        )
-        to_delete.append(standing.eve_entity_id)
+        # Primary check: character owner must have permission
+        owner_user_id = ownership_map.get(standing.eve_entity_id)
+
+        if owner_user_id is None:
+            logger.info(
+                "Auto-revoking standing for %s: no character owner found in Auth",
+                standing.eve_entity.name,
+            )
+            to_delete.append(standing.eve_entity_id)
+            no_owner_count += 1
+            continue
+
+        if owner_user_id not in users_with_perm:
+            owner_name = owner_usernames.get(owner_user_id, "unknown")
+            logger.info(
+                "Auto-revoking standing for %s: character owner '%s' lost permission",
+                standing.eve_entity.name,
+                owner_name,
+            )
+            to_delete.append(standing.eve_entity_id)
+            owner_lost_perm_count += 1
+            continue
+
+        # Secondary check: added_by user (if set) must also have permission
+        if standing.added_by_id and standing.added_by_id not in users_with_perm:
+            logger.info(
+                "Auto-revoking standing for %s: requester '%s' lost permission",
+                standing.eve_entity.name,
+                standing.added_by.username,
+            )
+            to_delete.append(standing.eve_entity_id)
+            added_by_lost_perm_count += 1
+            continue
+
+        valid_count += 1
 
     if to_delete:
         StandingsEntry.objects.filter(eve_entity_id__in=to_delete).delete()
 
     logger.info(
-        "Standings validation complete: %d valid, %d revoked, %d skipped (pending revocation)",
+        "Standings validation complete: %d valid, %d revoked "
+        "(no_owner=%d, owner_lost_perm=%d, requester_lost_perm=%d), "
+        "%d skipped (pending revocation)",
         valid_count,
         len(to_delete),
+        no_owner_count,
+        owner_lost_perm_count,
+        added_by_lost_perm_count,
         skipped_count,
     )
 
